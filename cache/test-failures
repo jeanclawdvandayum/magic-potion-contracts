@@ -1,1 +1,1 @@
-test_fullLifecycle_noWinner_rollover|test_multiDrawing_prizeGrowth
+testFuzz_staking_proportionalRewards|testFuzz_staking_rewardDebtAccurate
