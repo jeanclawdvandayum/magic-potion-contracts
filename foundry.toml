@@ -10,7 +10,6 @@ ffi = false
 
 remappings = [
     "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
-    "@chainlink/=lib/chainlink/contracts/",
     "forge-std/=lib/forge-std/src/"
 ]
 
