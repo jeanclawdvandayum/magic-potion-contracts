@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.24;
 
 import {ERC721Enumerable, ERC721} from "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
 import {Base64} from "@openzeppelin/contracts/utils/Base64.sol";
@@ -17,7 +17,7 @@ contract TicketNFT is ERC721Enumerable {
     using Strings for uint16;
 
     // ──── State ────
-    address public coordinator;
+    address public immutable coordinator;
     uint256 private _nextTokenId = 1;
 
     struct TicketData {

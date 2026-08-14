@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.24;
 
 /// @title Events — Protocol-wide event definitions
 /// @notice All Magic Potion events in one place
@@ -36,7 +36,7 @@ library Events {
 
     event TicketSalesClosed(uint256 indexed drawingId, uint256 totalTickets);
 
-    event DrawingTriggered(uint256 indexed drawingId, uint256 vrfRequestId);
+    event DrawingTriggered(uint256 indexed drawingId, uint256 targetRound);
 
     event DrawingResolved(
         uint256 indexed drawingId,
@@ -51,7 +51,7 @@ library Events {
         uint256 winnerCount
     );
 
-    event VRFRetry(uint256 indexed drawingId);
+    event DrandRetry(uint256 indexed drawingId);
 
     // ──── Prize Events ────
     event PrizeClaimed(
@@ -94,6 +94,22 @@ library Events {
     event PauseToggled(bool paused);
     event OpsMultisigUpdated(address newOps);
     event MinterUpdated(address newMinter);
+
+    // ──── Keeper Events ────
+    event KeeperPaid(address indexed keeper, uint256 amount);
+    event KeeperParamsUpdated(uint256 baseReward, uint256 ratePerStep, uint256 stepDuration);
+
+    // ──── Epoch Events ────
+    event EpochAdvanced(uint256 indexed newEpoch);
+
+    // ──── Treasury ────
+    event TreasuryUpdated(address indexed newTreasury);
+
+    // ──── Fee Split ────
+    event FeeSplitUpdated(uint256 prizeBps, uint256 stakingBps, uint256 treasuryBps);
+
+    // ──── V3 Integration ────
+    event V3Deposited(uint256 usdcAmount, uint256 sharesReceived);
 
     // ──── NFT Events ────
     event TicketMinted(

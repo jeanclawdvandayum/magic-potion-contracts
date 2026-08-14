@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.24;
 
 /// @title IVRFCoordinatorV2Plus — Minimal interface for Chainlink VRF V2.5
 /// @notice Only the functions needed by DrawingManager

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.24;
 
 /// @title Errors — Protocol-wide custom errors
 /// @notice All Magic Potion revert reasons in one place
@@ -45,7 +45,11 @@ library Errors {
     error ZeroAddress();
     error CannotRescueProtocolToken();
 
-    // ──── VRF ────
-    error VRFTimeoutNotReached();
-    error InvalidVRFRequest();
+    // ──── Randomness ────
+    error DrandTimeoutNotReached();
+    error InvalidDrandRound();
+
+    // ──── Fee Split ────
+    error TreasuryCapExceeded();
+    error InvalidFeeSplit();
 }

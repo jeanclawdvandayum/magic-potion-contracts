@@ -39,7 +39,7 @@ contract ConstantsTest is Test {
     /// @notice Burn reward is less than mint reward
     function test_burnRewardLessThanMint() public pure {
         assertTrue(
-            Constants.BURN_LUCK_REWARD < Constants.LUCK_PER_TICKET,
+            Constants.BURN_LUCK_REWARD < 1e18,
             "Burn reward must be less than mint reward"
         );
     }

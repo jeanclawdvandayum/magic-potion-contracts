@@ -1,68 +1,52 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.24;
 
-import {IVRFCoordinatorV2Plus} from "./interfaces/chainlink/IVRFCoordinatorV2Plus.sol";
+import {IDrandBeacon} from "./interfaces/IDrandBeacon.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Constants} from "./libraries/Constants.sol";
 import {Errors} from "./libraries/Errors.sol";
 import {Events} from "./libraries/Events.sol";
 
-/// @title DrawingManager — Lottery drawing lifecycle + Chainlink VRF V2.5
-/// @notice Manages drawing state machine (OPEN → CLOSED → PENDING_VRF → RESOLVED),
-///         ticket registration, hash tracking, and VRF randomness resolution.
-/// @dev Uses a minimal VRF coordinator interface. The actual Chainlink VRFConsumerBaseV2Plus
-///      is replaced with a simpler pattern: coordinator calls rawFulfillRandomWords().
-contract DrawingManager {
+/// @title DrawingManager — Lottery drawing lifecycle + drand randomness
+/// @notice Manages drawing state machine (OPEN -> CLOSED -> PENDING_RANDOMNESS -> RESOLVED),
+///         ticket registration, hash tracking, and drand beacon resolution.
+/// @dev Uses drand's evmnet beacon (BN254 curve). Anyone can submit the beacon
+///      signature after the target round is produced - verification is on-chain.
+contract DrawingManager is ReentrancyGuard {
     // ──── Enums ────
-    enum DrawingState { OPEN, CLOSED, PENDING_VRF, RESOLVED }
+    enum DrawingState { OPEN, CLOSED, PENDING_RANDOMNESS, RESOLVED }
 
     // ──── Structs ────
     struct Drawing {
         DrawingState state;
         uint256 openTime;
-        uint256 closeTime;    // openTime + DRAWING_DURATION - TICKET_CUTOFF
-        uint256 drawTime;     // openTime + DRAWING_DURATION
+        uint256 closeTime;
+        uint256 drawTime;
         uint256 totalTickets;
         uint16 winningHash;
         uint256 winnerCount;
-        uint256 vrfRequestId;
-        uint256 vrfRequestTime;
+        uint256 targetRound;     // drand round committed to
+        uint256 requestTime;     // when triggerDrawing was called
+        uint256 resolvedTime;    // when randomness was delivered
     }
 
     // ──── State ────
-    address public coordinator;
-    IVRFCoordinatorV2Plus public immutable vrfCoordinator;
+    address public immutable coordinator;
+    IDrandBeacon public immutable drandBeacon;
     uint256 public currentDrawingId;
 
     mapping(uint256 => Drawing) public drawings;
     mapping(uint256 => mapping(uint16 => uint256)) public hashTicketCount;
     mapping(uint256 => mapping(uint16 => uint256[])) public hashTicketIds;
-    mapping(uint256 => uint256) public vrfRequestToDrawing;
-
-    // ──── VRF Config ────
-    uint256 public s_subscriptionId;
-    bytes32 public s_keyHash;
-    uint32 public s_callbackGasLimit;
-    uint16 public s_requestConfirmations;
 
     // ──── Constructor ────
 
-    constructor(
-        address _vrfCoordinator,
-        address _coordinator,
-        uint256 subscriptionId,
-        bytes32 keyHash,
-        uint32 callbackGasLimit,
-        uint16 requestConfirmations
-    ) {
-        if (_vrfCoordinator == address(0) || _coordinator == address(0)) {
+    constructor(address _drandBeacon, address _coordinator) {
+        if (_drandBeacon == address(0) || _coordinator == address(0)) {
             revert Errors.ZeroAddress();
         }
-        vrfCoordinator = IVRFCoordinatorV2Plus(_vrfCoordinator);
+        drandBeacon = IDrandBeacon(_drandBeacon);
         coordinator = _coordinator;
-        s_subscriptionId = subscriptionId;
-        s_keyHash = keyHash;
-        s_callbackGasLimit = callbackGasLimit;
-        s_requestConfirmations = requestConfirmations;
     }
 
     // ──── Modifiers ────
@@ -85,8 +69,9 @@ contract DrawingManager {
             totalTickets: 0,
             winningHash: 0,
             winnerCount: 0,
-            vrfRequestId: 0,
-            vrfRequestTime: 0
+            targetRound: 0,
+            requestTime: 0,
+            resolvedTime: 0
         });
 
         emit Events.DrawingStarted(drawingId, block.timestamp);
@@ -113,7 +98,10 @@ contract DrawingManager {
         emit Events.TicketSalesClosed(drawingId, drawing.totalTickets);
     }
 
-    function triggerDrawing(uint256 drawingId) external onlyCoordinator {
+    /// @notice Commit to a future drand round for randomness.
+    /// @dev Called by coordinator after closing ticket sales and distributing alUSD.
+    ///      Targets a drand round ~30s in the future to ensure it hasn't been produced yet.
+    function triggerDrawing(uint256 drawingId) external onlyCoordinator nonReentrant {
         Drawing storage drawing = drawings[drawingId];
 
         // Auto-close if needed
@@ -125,71 +113,74 @@ contract DrawingManager {
         if (drawing.state != DrawingState.CLOSED) revert Errors.InvalidDrawingState();
         if (block.timestamp < drawing.drawTime) revert Errors.DrawingNotReady();
 
-        uint256 requestId = vrfCoordinator.requestRandomWords(
-            IVRFCoordinatorV2Plus.RandomWordsRequest({
-                keyHash: s_keyHash,
-                subId: s_subscriptionId,
-                requestConfirmations: s_requestConfirmations,
-                callbackGasLimit: s_callbackGasLimit,
-                numWords: 1,
-                extraArgs: ""
-            })
-        );
+        // Compute target round and commit
+        drawing.targetRound = _computeRound(block.timestamp + Constants.DRAND_DELAY);
+        drawing.state = DrawingState.PENDING_RANDOMNESS;
+        drawing.requestTime = block.timestamp;
 
-        drawing.state = DrawingState.PENDING_VRF;
-        drawing.vrfRequestId = requestId;
-        drawing.vrfRequestTime = block.timestamp;
-        vrfRequestToDrawing[requestId] = drawingId;
-
-        emit Events.DrawingTriggered(drawingId, requestId);
+        emit Events.DrawingTriggered(drawingId, drawing.targetRound);
     }
 
-    function retryVRF(uint256 drawingId) external onlyCoordinator {
+    /// @notice Submit drand beacon data to resolve a pending drawing.
+    /// @dev OPEN KEEPER: anyone can call this. The BLS signature is verified on-chain.
+    /// @param drawingId The drawing to resolve
+    /// @param round The drand round number (must match targetRound)
+    /// @param signature The BLS signature on G1 [x, y]
+    function submitRandomness(
+        uint256 drawingId,
+        uint256 round,
+        uint256[2] calldata signature
+    ) external nonReentrant {
         Drawing storage drawing = drawings[drawingId];
-        if (drawing.state != DrawingState.PENDING_VRF) revert Errors.InvalidDrawingState();
-        if (block.timestamp < drawing.vrfRequestTime + Constants.VRF_TIMEOUT) {
-            revert Errors.VRFTimeoutNotReached();
-        }
+        if (drawing.state != DrawingState.PENDING_RANDOMNESS) revert Errors.InvalidDrawingState();
+        if (round != drawing.targetRound) revert Errors.InvalidDrandRound();
 
-        uint256 requestId = vrfCoordinator.requestRandomWords(
-            IVRFCoordinatorV2Plus.RandomWordsRequest({
-                keyHash: s_keyHash,
-                subId: s_subscriptionId,
-                requestConfirmations: s_requestConfirmations,
-                callbackGasLimit: s_callbackGasLimit,
-                numWords: 1,
-                extraArgs: ""
-            })
-        );
+        // Verify BLS signature on-chain via the drand beacon contract
+        drandBeacon.verifyBeaconRound(round, signature);
 
-        drawing.vrfRequestId = requestId;
-        drawing.vrfRequestTime = block.timestamp;
-        vrfRequestToDrawing[requestId] = drawingId;
+        // Derive randomness from the signature
+        uint256 randomness = uint256(keccak256(abi.encode(
+            signature[0],
+            signature[1],
+            block.chainid,
+            address(this),
+            drawingId
+        )));
 
-        emit Events.VRFRetry(drawingId);
-    }
-
-    // ──── VRF Callback ────
-
-    /// @notice Called by VRF coordinator to deliver randomness
-    /// @dev Only callable by the VRF coordinator contract
-    function rawFulfillRandomWords(uint256 requestId, uint256[] calldata randomWords) external {
-        if (msg.sender != address(vrfCoordinator)) revert Errors.InvalidVRFRequest();
-
-        uint256 drawingId = vrfRequestToDrawing[requestId];
-        if (drawingId == 0) revert Errors.InvalidVRFRequest();
-
-        Drawing storage drawing = drawings[drawingId];
-        if (drawing.state != DrawingState.PENDING_VRF) return;
-
-        uint16 winningHash = uint16(randomWords[0] & 0xFFFF);
+        uint16 winningHash = uint16(randomness & 0xFFFF);
         uint256 winnerCount = hashTicketCount[drawingId][winningHash];
 
         drawing.winningHash = winningHash;
         drawing.winnerCount = winnerCount;
         drawing.state = DrawingState.RESOLVED;
+        drawing.resolvedTime = block.timestamp;
 
         emit Events.DrawingResolved(drawingId, winningHash, winnerCount);
+    }
+
+    /// @notice Retarget to a new drand round if the original times out.
+    /// @dev Called by coordinator if no keeper submits within DRAND_TIMEOUT.
+    function retryRound(uint256 drawingId) external onlyCoordinator nonReentrant {
+        Drawing storage drawing = drawings[drawingId];
+        if (drawing.state != DrawingState.PENDING_RANDOMNESS) revert Errors.InvalidDrawingState();
+        if (block.timestamp < drawing.requestTime + Constants.DRAND_TIMEOUT) {
+            revert Errors.DrandTimeoutNotReached();
+        }
+
+        drawing.targetRound = _computeRound(block.timestamp + Constants.DRAND_DELAY);
+        drawing.requestTime = block.timestamp;
+
+        emit Events.DrandRetry(drawingId);
+    }
+
+    // ──── Internal ────
+
+    /// @dev Compute the drand round for a given timestamp
+    function _computeRound(uint256 timestamp) internal view returns (uint256) {
+        uint256 genesis = drandBeacon.genesisTimestamp();
+        uint256 period = drandBeacon.period();
+        uint256 delta = timestamp - genesis;
+        return delta / period + (delta % period > 0 ? 1 : 0);
     }
 
     // ──── View Functions ────

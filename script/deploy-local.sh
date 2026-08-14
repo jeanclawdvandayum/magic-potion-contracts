@@ -82,6 +82,27 @@ cat > "$OUTDIR/local.json" << EOF
 }
 EOF
 
+# Auto-update frontend addresses if frontend exists
+FE_ADDR="$HOME/Desktop/projects/lucky-potion/frontend/src/contracts/addresses.ts"
+if [ -d "$(dirname "$FE_ADDR")" ]; then
+  cat > "$FE_ADDR" << FEOF
+// Auto-generated from Anvil deployment
+export const ADDRESSES = {
+  coordinator: '$COORD' as const,
+  usdc: '$USDC' as const,
+  alUSD: '$ALUSD' as const,
+  alchemist: '$ALCHEMIST' as const,
+  vrfCoordinator: '$VRFC' as const,
+  ticketNFT: '$NFT' as const,
+  luckToken: '$LUCK' as const,
+  luckStaking: '$STAKING' as const,
+  drawingManager: '$DM' as const,
+  prizeVault: '$VAULT' as const,
+} as const;
+FEOF
+  echo "✅ Updated frontend addresses"
+fi
+
 echo ""
 echo "🧪 === DEPLOYMENT COMPLETE ==="
 cat "$OUTDIR/local.json"

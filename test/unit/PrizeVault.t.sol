@@ -111,9 +111,9 @@ contract PrizeVaultTest is Test {
         vault.deposit(1, 900e18);
         vault.resolveDrawing(1, 0x1234, 3); // 3 winners
 
-        vault.claimPrize(1, alice);
-        vault.claimPrize(1, bob);
-        vault.claimPrize(1, address(0xCA201));
+        vault.claimPrize(1, 1, alice);
+        vault.claimPrize(1, 2, bob);
+        vault.claimPrize(1, 3, address(0xCA201));
         vm.stopPrank();
 
         // Each gets 900/3 = 300
@@ -127,9 +127,9 @@ contract PrizeVaultTest is Test {
         vault.deposit(1, 100e18 + 1); // 3 winners, 100...001 / 3 truncates → dust of 2 wei
         vault.resolveDrawing(1, 0x1234, 3);
 
-        vault.claimPrize(1, alice);
-        vault.claimPrize(1, bob);
-        vault.claimPrize(1, address(0xCA201));
+        vault.claimPrize(1, 1, alice);
+        vault.claimPrize(1, 2, bob);
+        vault.claimPrize(1, 3, address(0xCA201));
         vm.stopPrank();
 
         // Dust stays in vault (can't distribute evenly)
@@ -144,10 +144,10 @@ contract PrizeVaultTest is Test {
         vm.startPrank(coordinator);
         vault.deposit(1, 1000e18);
         vault.resolveDrawing(1, 0x1234, 1);
-        vault.claimPrize(1, alice);
+        vault.claimPrize(1, 1, alice);
 
         vm.expectRevert(Errors.TicketAlreadyClaimed.selector);
-        vault.claimPrize(1, alice);
+        vault.claimPrize(1, 1, alice);
         vm.stopPrank();
     }
 
@@ -156,7 +156,7 @@ contract PrizeVaultTest is Test {
         vault.deposit(1, 1000e18);
 
         vm.expectRevert(Errors.DrawingNotResolved.selector);
-        vault.claimPrize(1, alice);
+        vault.claimPrize(1, 1, alice);
         vm.stopPrank();
     }
 
@@ -166,7 +166,7 @@ contract PrizeVaultTest is Test {
         vault.resolveDrawing(1, 0x1234, 0);
 
         vm.expectRevert(Errors.DrawingHasNoWinner.selector);
-        vault.claimPrize(1, alice);
+        vault.claimPrize(1, 1, alice);
         vm.stopPrank();
     }
 }

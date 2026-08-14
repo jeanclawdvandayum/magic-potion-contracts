@@ -10,8 +10,8 @@ import {DrawingManager} from "../../src/DrawingManager.sol";
 import {PrizeVault} from "../../src/PrizeVault.sol";
 import {Constants} from "../../src/libraries/Constants.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
-import {MockAlchemistV3} from "../mocks/MockAlchemistV3.sol";
-import {MockVRFCoordinator} from "../mocks/MockVRFCoordinator.sol";
+import {MockAlchemistV3, MockMYTVault} from "../mocks/MockAlchemistV3.sol";
+import {MockDrandBeacon} from "../mocks/MockDrandBeacon.sol";
 
 /// @title FullLifecycle — End-to-end integration tests
 contract FullLifecycleTest is Test {
@@ -24,33 +24,35 @@ contract FullLifecycleTest is Test {
     MockERC20 public usdc;
     MockERC20 public alUSD;
     MockAlchemistV3 public alchemist;
-    MockVRFCoordinator public vrfCoordinator;
+    MockDrandBeacon public drandBeacon;
 
     address public alice = makeAddr("alice");
     address public bob = makeAddr("bob");
     address public charlie = makeAddr("charlie");
-    address public opsMultisig = makeAddr("opsMultisig");
-    address public yieldToken = makeAddr("yieldToken");
-
+    address public treasury = makeAddr("treasury");
+    MockMYTVault public mytVault;
+    MockERC20 public mytShare;
     function setUp() public {
         usdc = new MockERC20("USD Coin", "USDC", 6);
         alUSD = new MockERC20("Alchemix USD", "alUSD", 18);
-        alchemist = new MockAlchemistV3(address(alUSD), address(usdc));
-        vrfCoordinator = new MockVRFCoordinator();
+        mytShare = new MockERC20("Mock MYT", "mytMOCK", 18);
+        mytVault = new MockMYTVault(address(usdc), address(mytShare));
+        alchemist = new MockAlchemistV3(address(alUSD), address(usdc), address(mytVault), address(0));
+        drandBeacon = new MockDrandBeacon();
 
         uint64 nonce = vm.getNonce(address(this));
         address predicted = vm.computeCreateAddress(address(this), nonce + 5);
 
-        drawingManager = new DrawingManager(address(vrfCoordinator), predicted, 1, bytes32(uint256(1)), 500_000, 3);
+        drawingManager = new DrawingManager(address(drandBeacon), predicted);
         ticketNFT = new TicketNFT(predicted);
         luckToken = new LuckToken(predicted);
         luckStaking = new LuckStaking(address(luckToken), address(alUSD), predicted);
         prizeVault = new PrizeVault(address(alUSD), predicted);
 
         coordinator = new LuckyPotion(
-            address(usdc), address(alUSD), address(alchemist), yieldToken,
+            address(usdc), address(alUSD), address(alchemist), address(alchemist.mytVaultAddress()),
             address(ticketNFT), address(luckToken), address(luckStaking),
-            address(drawingManager), address(prizeVault), opsMultisig
+            address(drawingManager), address(prizeVault), treasury
         );
 
         // Fund users
@@ -81,10 +83,35 @@ contract FullLifecycleTest is Test {
     function _triggerAndResolve(uint256 drawingId, uint256 randomSeed) internal {
         coordinator.triggerDrawing();
         DrawingManager.Drawing memory d = drawingManager.getDrawing(drawingId);
-        uint256[] memory words = new uint256[](1);
-        words[0] = randomSeed;
-        vrfCoordinator.fulfillRandomWordsWithOverride(d.vrfRequestId, words);
+        uint256[2] memory sig = [uint256(1), uint256(2)];
+        drandBeacon.setSignature(d.targetRound, sig);
+        drawingManager.submitRandomness(drawingManager.currentDrawingId(), d.targetRound, sig);
         coordinator.finalizeDrawing();
+    }
+
+    /// @dev Resolve the current drawing so winningHash == desiredHash.
+    ///      Under drand, randomness = keccak256(sig0, sig1, chainid,
+    ///      address(drawingManager), drawingId) — brute-force sig[0]
+    ///      until the low 16 bits match (expected ~65k tries).
+    function _resolveToHash(uint16 desiredHash) internal {
+        uint256 drawingId = drawingManager.currentDrawingId();
+        DrawingManager.Drawing memory d = drawingManager.getDrawing(drawingId);
+        // Preallocate the 160-byte abi.encode buffer once and patch sig[0]
+        // in place per iteration — per-iteration abi.encode balloons memory
+        // and hits MemoryOOG long before a typical ~65k-try match.
+        bytes memory buf = abi.encode(uint256(0), uint256(0), block.chainid, address(drawingManager), drawingId);
+        uint256 hit = 0;
+        for (uint256 i = 1; i < 1_000_000; i++) {
+            assembly { mstore(add(buf, 32), i) }
+            if (uint16(uint256(keccak256(buf)) & 0xFFFF) == desiredHash) {
+                hit = i;
+                break;
+            }
+        }
+        assertTrue(hit != 0, "brute-force failed to hit desired hash");
+        uint256[2] memory sig = [hit, uint256(0)];
+        drandBeacon.setSignature(d.targetRound, sig);
+        drawingManager.submitRandomness(drawingId, d.targetRound, sig);
     }
 
     // ══════════════════════════════════════════════
@@ -103,15 +130,11 @@ contract FullLifecycleTest is Test {
             coordinator.buyTicket(_canvas(uint8(100 + i)));
         }
 
-        // Advance and trigger
         _advanceDraw();
         coordinator.triggerDrawing();
 
-        // Resolve VRF to alice's hash
-        DrawingManager.Drawing memory d = drawingManager.getDrawing(1);
-        uint256[] memory words = new uint256[](1);
-        words[0] = uint256(ticket.canvasHash);
-        vrfCoordinator.fulfillRandomWordsWithOverride(d.vrfRequestId, words);
+        // Resolve to alice's hash
+        _resolveToHash(ticket.canvasHash);
         coordinator.finalizeDrawing();
 
         // Alice claims
@@ -172,10 +195,7 @@ contract FullLifecycleTest is Test {
         coordinator.triggerDrawing();
 
         // Resolve to matching hash
-        DrawingManager.Drawing memory d = drawingManager.getDrawing(1);
-        uint256[] memory words = new uint256[](1);
-        words[0] = uint256(ticket.canvasHash);
-        vrfCoordinator.fulfillRandomWordsWithOverride(d.vrfRequestId, words);
+        _resolveToHash(ticket.canvasHash);
         coordinator.finalizeDrawing();
 
         // All three claim
@@ -215,15 +235,14 @@ contract FullLifecycleTest is Test {
     }
 
     function test_fullLifecycle_stakingRewards() public {
-        // Alice buys ticket → gets LUCK → stakes it
-        vm.prank(alice);
-        coordinator.buyTicket(_canvas(1));
-        uint256 luckBalance = luckToken.balanceOf(alice);
-        assertEq(luckBalance, Constants.LUCK_PER_TICKET);
+        // Alice gets LUCK by burning losing tickets. For test simplicity,
+        // prank as coordinator (the LUCK minter) to mint directly.
+        vm.prank(address(coordinator));
+        luckToken.mint(alice, 1e18);
 
         vm.startPrank(alice);
-        luckToken.approve(address(luckStaking), luckBalance);
-        luckStaking.stake(luckBalance);
+        luckToken.approve(address(luckStaking), 1e18);
+        luckStaking.stake(1e18);
         vm.stopPrank();
 
         // Buy more tickets to generate yield
@@ -270,12 +289,12 @@ contract FullLifecycleTest is Test {
     }
 
     function test_stakingAcrossMultipleDrawings() public {
-        // Alice stakes LUCK from first ticket purchase
-        vm.prank(alice);
-        coordinator.buyTicket(_canvas(1));
+        // Mint LUCK to Alice for staking (simulating accumulated burns)
+        vm.prank(address(coordinator));
+        luckToken.mint(alice, 1e18);
         vm.startPrank(alice);
-        luckToken.approve(address(luckStaking), Constants.LUCK_PER_TICKET);
-        luckStaking.stake(Constants.LUCK_PER_TICKET);
+        luckToken.approve(address(luckStaking), 1e18);
+        luckStaking.stake(1e18);
         vm.stopPrank();
 
         uint256 totalRewards;

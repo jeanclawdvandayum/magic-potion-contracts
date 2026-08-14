@@ -79,7 +79,7 @@ contract LuckStakingTest is Test {
         vm.prank(alice);
         staking.stake(10e18);
 
-        (uint256 stakedAmount, ) = staking.userInfo(alice);
+        (uint256 stakedAmount,,) = staking.userInfo(alice);
         assertEq(stakedAmount, 10e18);
         assertEq(staking.totalStaked(), 10e18);
     }

@@ -11,8 +11,8 @@ import {PrizeVault} from "../../src/PrizeVault.sol";
 import {Constants} from "../../src/libraries/Constants.sol";
 import {Errors} from "../../src/libraries/Errors.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
-import {MockAlchemistV3} from "../mocks/MockAlchemistV3.sol";
-import {MockVRFCoordinator} from "../mocks/MockVRFCoordinator.sol";
+import {MockAlchemistV3, MockMYTVault} from "../mocks/MockAlchemistV3.sol";
+import {MockDrandBeacon} from "../mocks/MockDrandBeacon.sol";
 
 contract LuckyPotionTest is Test {
     LuckyPotion public coordinator;
@@ -24,14 +24,14 @@ contract LuckyPotionTest is Test {
     MockERC20 public usdc;
     MockERC20 public alUSD;
     MockAlchemistV3 public alchemist;
-    MockVRFCoordinator public vrfCoordinator;
+    MockDrandBeacon public drandBeacon;
 
     address public deployer = address(this);
     address public alice = makeAddr("alice");
     address public bob = makeAddr("bob");
-    address public opsMultisig = makeAddr("opsMultisig");
-    address public yieldToken = makeAddr("yieldToken");
-
+    address public treasury = makeAddr("treasury");
+    MockMYTVault public mytVault;
+    MockERC20 public mytShare;
     bytes public validCanvas;
 
     function setUp() public {
@@ -40,10 +40,12 @@ contract LuckyPotionTest is Test {
         alUSD = new MockERC20("Alchemix USD", "alUSD", 18);
 
         // Deploy mock Alchemist
-        alchemist = new MockAlchemistV3(address(alUSD), address(usdc));
+        mytShare = new MockERC20("Mock MYT", "mytMOCK", 18);
+        mytVault = new MockMYTVault(address(usdc), address(mytShare));
+        alchemist = new MockAlchemistV3(address(alUSD), address(usdc), address(mytVault), address(0));
 
         // Deploy VRF coordinator
-        vrfCoordinator = new MockVRFCoordinator();
+        drandBeacon = new MockDrandBeacon();
 
         // We need to deploy coordinator first to pass as address to sub-contracts
         // But sub-contracts need coordinator address... Use CREATE2 or just deploy in right order.
@@ -59,7 +61,7 @@ contract LuckyPotionTest is Test {
         // Compute coordinator address: deployer nonce is currently at some point,
         // we need to figure out how many deploys happen first.
         // Simpler: deploy coordinator address last. Sub-contracts need it.
-        // Let's count: after setup tokens/alchemist/vrfCoordinator, we deploy
+        // Let's count: after setup tokens/alchemist/drandBeacon, we deploy
         // sub-contracts. We need the coordinator address BEFORE deploying them.
 
         // Use vm.computeCreateAddress to predict.
@@ -70,14 +72,7 @@ contract LuckyPotionTest is Test {
         address predictedCoordinator = vm.computeCreateAddress(address(this), currentNonce + 5);
 
         // Deploy sub-contracts with predicted coordinator address
-        drawingManager = new DrawingManager(
-            address(vrfCoordinator),
-            predictedCoordinator,
-            1, // subscriptionId
-            bytes32(uint256(1)), // keyHash
-            500_000, // callbackGasLimit
-            3 // requestConfirmations
-        );
+        drawingManager = new DrawingManager(address(drandBeacon), predictedCoordinator);
 
         ticketNFT = new TicketNFT(predictedCoordinator);
         luckToken = new LuckToken(predictedCoordinator);
@@ -89,13 +84,13 @@ contract LuckyPotionTest is Test {
             address(usdc),
             address(alUSD),
             address(alchemist),
-            yieldToken,
+            address(alchemist.mytVaultAddress()),
             address(ticketNFT),
             address(luckToken),
             address(luckStaking),
             address(drawingManager),
             address(prizeVault),
-            opsMultisig
+            treasury
         );
         assertEq(address(coordinator), predictedCoordinator, "coordinator address mismatch");
 
@@ -143,7 +138,34 @@ contract LuckyPotionTest is Test {
         DrawingManager.Drawing memory d = drawingManager.getDrawing(drawingId);
         uint256[] memory randomWords = new uint256[](1);
         randomWords[0] = uint256(keccak256(abi.encodePacked("random", drawingId)));
-        vrfCoordinator.fulfillRandomWordsWithOverride(d.vrfRequestId, randomWords);
+        uint256[2] memory sig = [uint256(1), uint256(2)];
+        drandBeacon.setSignature(d.targetRound, sig);
+        drawingManager.submitRandomness(drawingManager.currentDrawingId(), d.targetRound, sig);
+    }
+
+    /// @dev Resolve the current drawing so winningHash == desiredHash.
+    ///      Under drand, randomness = keccak256(sig0, sig1, chainid,
+    ///      address(drawingManager), drawingId) — we brute-force sig[0]
+    ///      until the low 16 bits match (expected ~65k tries).
+    function _resolveToHash(uint16 desiredHash) internal {
+        uint256 drawingId = drawingManager.currentDrawingId();
+        DrawingManager.Drawing memory d = drawingManager.getDrawing(drawingId);
+        // Preallocate the 160-byte abi.encode buffer once and patch sig[0]
+        // in place per iteration — per-iteration abi.encode balloons memory
+        // and hits MemoryOOG long before a typical ~65k-try match.
+        bytes memory buf = abi.encode(uint256(0), uint256(0), block.chainid, address(drawingManager), drawingId);
+        uint256 hit = 0;
+        for (uint256 i = 1; i < 1_000_000; i++) {
+            assembly { mstore(add(buf, 32), i) }
+            if (uint16(uint256(keccak256(buf)) & 0xFFFF) == desiredHash) {
+                hit = i;
+                break;
+            }
+        }
+        assertTrue(hit != 0, "brute-force failed to hit desired hash");
+        uint256[2] memory sig = [hit, uint256(0)];
+        drandBeacon.setSignature(d.targetRound, sig);
+        drawingManager.submitRandomness(drawingId, d.targetRound, sig);
     }
 
     // ══════════════════════════════════════════════
@@ -184,15 +206,16 @@ contract LuckyPotionTest is Test {
         // NFT minted to alice
         assertEq(ticketNFT.ownerOf(ticketId), alice);
 
-        // LUCK minted
+        // LUCK minted: 1 per ticket
+        // LUCK minted: 1 per ticket
         assertEq(luckToken.balanceOf(alice), Constants.LUCK_PER_TICKET);
 
         // Drawing ticket count
         DrawingManager.Drawing memory d = drawingManager.getDrawing(1);
         assertEq(d.totalTickets, 1);
 
-        // Alchemist deposit
-        assertEq(alchemist.deposited(address(coordinator)), Constants.TICKET_PRICE);
+        // Alchemist deposit (1 ticket = TICKET_PRICE USDC -> 1:1 MYT shares)
+        { (uint256 col,,) = alchemist.getCDP(coordinator.positionTokenId()); assertEq(col, Constants.TICKET_PRICE); }
     }
 
     function test_buyTicket_whenPaused_reverts() public {
@@ -234,8 +257,9 @@ contract LuckyPotionTest is Test {
 
         assertEq(ticketIds.length, 5);
         assertEq(usdc.balanceOf(alice), 1000e6 - (Constants.TICKET_PRICE * 5));
+        // LUCK minted: 1 per ticket * 5 = 5 LUCK
         assertEq(luckToken.balanceOf(alice), Constants.LUCK_PER_TICKET * 5);
-        assertEq(alchemist.deposited(address(coordinator)), Constants.TICKET_PRICE * 5);
+        { (uint256 col,,) = alchemist.getCDP(coordinator.positionTokenId()); assertEq(col, Constants.TICKET_PRICE * 5); }
 
         DrawingManager.Drawing memory d = drawingManager.getDrawing(1);
         assertEq(d.totalTickets, 5);
@@ -280,18 +304,18 @@ contract LuckyPotionTest is Test {
 
         _advanceToDrawTime();
 
-        uint256 opsBefore = alUSD.balanceOf(opsMultisig);
+        uint256 opsBefore = alUSD.balanceOf(treasury);
 
         coordinator.triggerDrawing();
 
         // Verify distribution
-        uint256 opsReceived = alUSD.balanceOf(opsMultisig) - opsBefore;
+        uint256 opsReceived = alUSD.balanceOf(treasury) - opsBefore;
         uint256 expectedOps = (expectedMintable * Constants.OPS_BPS) / Constants.BPS_DENOMINATOR;
         assertEq(opsReceived, expectedOps, "ops share incorrect");
 
-        // Drawing should be PENDING_VRF
+        // Drawing should be PENDING_RANDOMNESS
         DrawingManager.Drawing memory d = drawingManager.getDrawing(1);
-        assertEq(uint8(d.state), uint8(DrawingManager.DrawingState.PENDING_VRF));
+        assertEq(uint8(d.state), uint8(DrawingManager.DrawingState.PENDING_RANDOMNESS));
     }
 
     function test_triggerDrawing_beforeDrawTime_reverts() public {
@@ -311,7 +335,7 @@ contract LuckyPotionTest is Test {
         coordinator.triggerDrawing();
 
         DrawingManager.Drawing memory d = drawingManager.getDrawing(1);
-        assertEq(uint8(d.state), uint8(DrawingManager.DrawingState.PENDING_VRF));
+        assertEq(uint8(d.state), uint8(DrawingManager.DrawingState.PENDING_RANDOMNESS));
     }
 
     // ══════════════════════════════════════════════
@@ -340,7 +364,7 @@ contract LuckyPotionTest is Test {
         _advanceToDrawTime();
         coordinator.triggerDrawing();
 
-        // Don't fulfill VRF — still PENDING_VRF
+        // Don't fulfill VRF — still PENDING_RANDOMNESS
         vm.expectRevert(Errors.DrawingNotResolved.selector);
         coordinator.finalizeDrawing();
     }
@@ -365,15 +389,8 @@ contract LuckyPotionTest is Test {
         _advanceToDrawTime();
         coordinator.triggerDrawing();
 
-        // Craft VRF result to match alice's first ticket's hash
-        uint256[] memory randomWords = new uint256[](1);
-        // The winning hash = randomWord % HASH_SPACE. We need it to equal ticket.canvasHash.
-        randomWords[0] = uint256(ticket.canvasHash); // will produce winningHash = canvasHash
-
-        DrawingManager.Drawing memory d = drawingManager.getDrawing(1);
-        vrfCoordinator.fulfillRandomWordsWithOverride(d.vrfRequestId, randomWords);
-
-        // Finalize
+        // Craft drand result to match alice's first ticket's hash
+        _resolveToHash(ticket.canvasHash);
         coordinator.finalizeDrawing();
 
         // Claim
@@ -382,7 +399,7 @@ contract LuckyPotionTest is Test {
         coordinator.claimPrize(ticketId);
 
         assertTrue(alUSD.balanceOf(alice) > aliceBefore, "alice should have received prize");
-        assertTrue(coordinator.ticketClaimed(ticketId), "ticket should be marked claimed");
+        assertTrue(prizeVault.isTicketClaimed(ticketId), "ticket should be marked claimed");
     }
 
     function test_claimPrize_notOwner_reverts() public {
@@ -406,7 +423,9 @@ contract LuckyPotionTest is Test {
         randomWords[0] = type(uint256).max; // very unlikely to match
 
         DrawingManager.Drawing memory d = drawingManager.getDrawing(1);
-        vrfCoordinator.fulfillRandomWordsWithOverride(d.vrfRequestId, randomWords);
+        uint256[2] memory sig = [uint256(1), uint256(2)];
+        drandBeacon.setSignature(d.targetRound, sig);
+        drawingManager.submitRandomness(drawingManager.currentDrawingId(), d.targetRound, sig);
         coordinator.finalizeDrawing();
 
         // Check that the winning hash doesn't match our ticket
@@ -431,10 +450,7 @@ contract LuckyPotionTest is Test {
         coordinator.triggerDrawing();
 
         // Make alice's ticket win
-        uint256[] memory randomWords = new uint256[](1);
-        randomWords[0] = uint256(ticket.canvasHash);
-        DrawingManager.Drawing memory d = drawingManager.getDrawing(1);
-        vrfCoordinator.fulfillRandomWordsWithOverride(d.vrfRequestId, randomWords);
+        _resolveToHash(ticket.canvasHash);
         coordinator.finalizeDrawing();
 
         // First claim
@@ -462,7 +478,9 @@ contract LuckyPotionTest is Test {
         uint256[] memory randomWords = new uint256[](1);
         randomWords[0] = type(uint256).max;
         DrawingManager.Drawing memory d = drawingManager.getDrawing(1);
-        vrfCoordinator.fulfillRandomWordsWithOverride(d.vrfRequestId, randomWords);
+        uint256[2] memory sig = [uint256(1), uint256(2)];
+        drandBeacon.setSignature(d.targetRound, sig);
+        drawingManager.submitRandomness(drawingManager.currentDrawingId(), d.targetRound, sig);
         coordinator.finalizeDrawing();
 
         // Verify not a winner (handle edge case)
@@ -488,10 +506,7 @@ contract LuckyPotionTest is Test {
         coordinator.triggerDrawing();
 
         // Make it win
-        uint256[] memory randomWords = new uint256[](1);
-        randomWords[0] = uint256(ticket.canvasHash);
-        DrawingManager.Drawing memory d = drawingManager.getDrawing(1);
-        vrfCoordinator.fulfillRandomWordsWithOverride(d.vrfRequestId, randomWords);
+        _resolveToHash(ticket.canvasHash);
         coordinator.finalizeDrawing();
 
         vm.prank(alice);
@@ -519,7 +534,9 @@ contract LuckyPotionTest is Test {
         uint256[] memory randomWords = new uint256[](1);
         randomWords[0] = type(uint256).max;
         DrawingManager.Drawing memory d = drawingManager.getDrawing(1);
-        vrfCoordinator.fulfillRandomWordsWithOverride(d.vrfRequestId, randomWords);
+        uint256[2] memory sig = [uint256(1), uint256(2)];
+        drandBeacon.setSignature(d.targetRound, sig);
+        drawingManager.submitRandomness(drawingManager.currentDrawingId(), d.targetRound, sig);
         coordinator.finalizeDrawing();
 
         TicketNFT.TicketData memory ticket = ticketNFT.getTicket(ticketId);
@@ -544,7 +561,9 @@ contract LuckyPotionTest is Test {
         uint256[] memory randomWords = new uint256[](1);
         randomWords[0] = type(uint256).max;
         DrawingManager.Drawing memory d = drawingManager.getDrawing(1);
-        vrfCoordinator.fulfillRandomWordsWithOverride(d.vrfRequestId, randomWords);
+        uint256[2] memory sig = [uint256(1), uint256(2)];
+        drandBeacon.setSignature(d.targetRound, sig);
+        drawingManager.submitRandomness(drawingManager.currentDrawingId(), d.targetRound, sig);
         coordinator.finalizeDrawing();
 
         TicketNFT.TicketData memory ticket = ticketNFT.getTicket(ticketId);
@@ -568,15 +587,15 @@ contract LuckyPotionTest is Test {
         assertFalse(coordinator.paused());
     }
 
-    function test_setOpsMultisig() public {
+    function test_setTreasury() public {
         address newOps = makeAddr("newOps");
-        coordinator.setOpsMultisig(newOps);
-        assertEq(coordinator.opsMultisig(), newOps);
+        coordinator.setTreasury(newOps);
+        assertEq(coordinator.treasury(), newOps);
     }
 
-    function test_setOpsMultisig_zeroAddress_reverts() public {
+    function test_setTreasury_zeroAddress_reverts() public {
         vm.expectRevert(Errors.ZeroAddress.selector);
-        coordinator.setOpsMultisig(address(0));
+        coordinator.setTreasury(address(0));
     }
 
     function test_rescueToken() public {
@@ -606,7 +625,7 @@ contract LuckyPotionTest is Test {
         _initializeProtocol();
         _buyTicketAsAlice();
 
-        (uint256 drawId, uint256 tickets, uint256 value, int256 debtVal) = coordinator.protocolStats();
+        (uint256 drawId, uint256 tickets, uint256 value, uint256 debtVal, uint256 borrowable) = coordinator.protocolStats();
         assertEq(drawId, 1);
         assertEq(tickets, 1);
         assertEq(value, Constants.TICKET_PRICE);

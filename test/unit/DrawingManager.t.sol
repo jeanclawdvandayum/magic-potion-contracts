@@ -1,32 +1,49 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.24;
 
 import "forge-std/Test.sol";
 import {DrawingManager} from "../../src/DrawingManager.sol";
 import {Constants} from "../../src/libraries/Constants.sol";
 import {Errors} from "../../src/libraries/Errors.sol";
-import {MockVRFCoordinator} from "../mocks/MockVRFCoordinator.sol";
+import {MockDrandBeacon} from "../mocks/MockDrandBeacon.sol";
 
 contract DrawingManagerTest is Test {
     DrawingManager dm;
-    MockVRFCoordinator vrfCoord;
+    MockDrandBeacon drandBeacon;
     address coordinator = address(0xC00D);
 
-    bytes32 constant KEY_HASH = keccak256("test");
-    uint32 constant CALLBACK_GAS = 200_000;
-    uint16 constant CONFIRMATIONS = 3;
-    uint256 constant SUB_ID = 1;
-
     function setUp() public {
-        vrfCoord = new MockVRFCoordinator();
-        dm = new DrawingManager(
-            address(vrfCoord),
-            coordinator,
-            SUB_ID,
-            KEY_HASH,
-            CALLBACK_GAS,
-            CONFIRMATIONS
-        );
+        // Warp to a realistic mainnet-era timestamp first: setUp below does
+        // block.timestamp-relative arithmetic and foundry defaults to ts=1.
+        vm.warp(1_750_000_000);
+        drandBeacon = new MockDrandBeacon();
+        // Set genesis far in the past so rounds work with current block.timestamp
+        drandBeacon.setGenesis(block.timestamp - 10000);
+        dm = new DrawingManager(address(drandBeacon), coordinator);
+    }
+
+    function _fulfillRandomness(uint256 drawingId) internal {
+        DrawingManager.Drawing memory d = dm.getDrawing(drawingId);
+        uint256[2] memory sig = [uint256(1), uint256(2)];
+        drandBeacon.setSignature(d.targetRound, sig);
+        dm.submitRandomness(drawingId, d.targetRound, sig);
+    }
+
+    function _fulfillRandomnessWithHash(uint256 drawingId, uint16 desiredHash) internal {
+        DrawingManager.Drawing memory d = dm.getDrawing(drawingId);
+        // We need the randomness to produce a specific lower 16 bits.
+        // The randomness is keccak256(sig0, sig1, chainid, address(this), drawingId).
+        // For testing, brute-force the sig[0] value until we get the right hash.
+        uint256[2] memory sig = [uint256(0), uint256(0)];
+        for (uint256 i = 1; i < 100_000; i++) {
+            sig[0] = i;
+            uint256 randomness = uint256(keccak256(abi.encode(sig[0], sig[1], block.chainid, address(dm), drawingId)));
+            if (uint16(randomness & 0xFFFF) == desiredHash) {
+                break;
+            }
+        }
+        drandBeacon.setSignature(d.targetRound, sig);
+        dm.submitRandomness(drawingId, d.targetRound, sig);
     }
 
     // ──── Start Drawing ────
@@ -69,7 +86,6 @@ contract DrawingManagerTest is Test {
         vm.prank(coordinator);
         dm.startDrawing();
 
-        // Warp past close time
         vm.warp(block.timestamp + Constants.DRAWING_DURATION - Constants.TICKET_CUTOFF);
 
         vm.prank(coordinator);
@@ -92,7 +108,7 @@ contract DrawingManagerTest is Test {
         dm.startDrawing();
 
         vm.warp(block.timestamp + Constants.DRAWING_DURATION - Constants.TICKET_CUTOFF);
-        dm.closeTicketSales(1); // permissionless
+        dm.closeTicketSales(1);
 
         DrawingManager.Drawing memory d = dm.getDrawing(1);
         assertEq(uint8(d.state), uint8(DrawingManager.DrawingState.CLOSED));
@@ -104,89 +120,71 @@ contract DrawingManagerTest is Test {
         vm.prank(coordinator);
         dm.startDrawing();
 
-        // Close sales
         vm.warp(block.timestamp + Constants.DRAWING_DURATION - Constants.TICKET_CUTOFF);
         dm.closeTicketSales(1);
 
-        // Try to trigger before drawTime
         vm.prank(coordinator);
         vm.expectRevert(Errors.DrawingNotReady.selector);
         dm.triggerDrawing(1);
     }
 
-    function test_triggerDrawing_requestsVRF() public {
+    function test_triggerDrawing_commitsToRound() public {
         vm.prank(coordinator);
         dm.startDrawing();
 
-        // Warp to drawTime (auto-closes)
         vm.warp(block.timestamp + Constants.DRAWING_DURATION);
 
         vm.prank(coordinator);
         dm.triggerDrawing(1);
 
         DrawingManager.Drawing memory d = dm.getDrawing(1);
-        assertEq(uint8(d.state), uint8(DrawingManager.DrawingState.PENDING_VRF));
-        assertTrue(d.vrfRequestId > 0);
+        assertEq(uint8(d.state), uint8(DrawingManager.DrawingState.PENDING_RANDOMNESS));
+        assertTrue(d.targetRound > 0);
     }
 
-    // ──── VRF Fulfillment ────
+    // ──── Submit Randomness ────
 
-    function test_fulfillRandomWords_setsWinningHash() public {
+    function test_submitRandomness_resolvesDrawing() public {
         vm.prank(coordinator);
         dm.startDrawing();
 
-        // Register some tickets
         vm.startPrank(coordinator);
-        dm.registerTicket(1, 100, 0x00AB); // hash = 0x00AB
+        dm.registerTicket(1, 100, 0x00AB);
         dm.registerTicket(1, 101, 0x00AB);
         vm.stopPrank();
 
-        // Warp and trigger
         vm.warp(block.timestamp + Constants.DRAWING_DURATION);
         vm.prank(coordinator);
         dm.triggerDrawing(1);
 
+        // Submit drand signature for the target round
+        _fulfillRandomnessWithHash(1, 0x00AB);
+
         DrawingManager.Drawing memory d = dm.getDrawing(1);
-
-        // Fulfill with random word that maps to 0x00AB
-        uint256[] memory words = new uint256[](1);
-        words[0] = uint256(0x00AB); // lower 16 bits = 0x00AB
-        vrfCoord.fulfillRandomWordsWithOverride(d.vrfRequestId, words);
-
-        d = dm.getDrawing(1);
         assertEq(d.winningHash, 0x00AB);
         assertEq(d.winnerCount, 2);
         assertEq(uint8(d.state), uint8(DrawingManager.DrawingState.RESOLVED));
     }
 
-    function test_fulfillRandomWords_noWinner() public {
+    function test_submitRandomness_noWinner() public {
         vm.prank(coordinator);
         dm.startDrawing();
 
-        // Register tickets with hash 0x0001
         vm.prank(coordinator);
         dm.registerTicket(1, 100, 0x0001);
 
-        // Warp and trigger
         vm.warp(block.timestamp + Constants.DRAWING_DURATION);
         vm.prank(coordinator);
         dm.triggerDrawing(1);
 
+        _fulfillRandomnessWithHash(1, 0x9999);
+
         DrawingManager.Drawing memory d = dm.getDrawing(1);
-
-        // Fulfill with random that doesn't match any ticket hash
-        uint256[] memory words = new uint256[](1);
-        words[0] = uint256(0x9999); // no tickets have this hash
-        vrfCoord.fulfillRandomWordsWithOverride(d.vrfRequestId, words);
-
-        d = dm.getDrawing(1);
         assertEq(d.winningHash, 0x9999);
         assertEq(d.winnerCount, 0);
     }
 
-    // ──── Retry VRF ────
-
-    function test_retryVRF_afterTimeout() public {
+    function test_submitRandomness_wrongRound_reverts() public {
         vm.prank(coordinator);
         dm.startDrawing();
 
@@ -194,18 +192,15 @@ contract DrawingManagerTest is Test {
         vm.prank(coordinator);
         dm.triggerDrawing(1);
 
-        // Warp past VRF timeout
-        vm.warp(block.timestamp + Constants.VRF_TIMEOUT + 1);
-
-        vm.prank(coordinator);
-        dm.retryVRF(1);
-
-        // Should still be PENDING_VRF but with new request
-        DrawingManager.Drawing memory d = dm.getDrawing(1);
-        assertEq(uint8(d.state), uint8(DrawingManager.DrawingState.PENDING_VRF));
+        uint256[2] memory sig = [uint256(1), uint256(2)];
+        drandBeacon.setSignature(99999, sig);
+        vm.expectRevert(Errors.InvalidDrandRound.selector);
+        dm.submitRandomness(1, 99999, sig);
     }
 
-    function test_retryVRF_beforeTimeout_reverts() public {
+    // ──── Retry Round ────
+
+    function test_retryRound_afterTimeout() public {
         vm.prank(coordinator);
         dm.startDrawing();
 
@@ -213,10 +208,26 @@ contract DrawingManagerTest is Test {
         vm.prank(coordinator);
         dm.triggerDrawing(1);
 
-        // Try retry immediately
+        vm.warp(block.timestamp + Constants.DRAND_TIMEOUT + 1);
+
         vm.prank(coordinator);
-        vm.expectRevert(Errors.VRFTimeoutNotReached.selector);
-        dm.retryVRF(1);
+        dm.retryRound(1);
+
+        DrawingManager.Drawing memory d = dm.getDrawing(1);
+        assertEq(uint8(d.state), uint8(DrawingManager.DrawingState.PENDING_RANDOMNESS));
+    }
+
+    function test_retryRound_beforeTimeout_reverts() public {
+        vm.prank(coordinator);
+        dm.startDrawing();
+
+        vm.warp(block.timestamp + Constants.DRAWING_DURATION);
+        vm.prank(coordinator);
+        dm.triggerDrawing(1);
+
+        vm.prank(coordinator);
+        vm.expectRevert(Errors.DrandTimeoutNotReached.selector);
+        dm.retryRound(1);
     }
 
     // ──── State Transitions ────
@@ -228,23 +239,18 @@ contract DrawingManagerTest is Test {
         DrawingManager.Drawing memory d = dm.getDrawing(1);
         assertEq(uint8(d.state), 0); // OPEN
 
-        // Close
         vm.warp(block.timestamp + Constants.DRAWING_DURATION - Constants.TICKET_CUTOFF);
         dm.closeTicketSales(1);
         d = dm.getDrawing(1);
         assertEq(uint8(d.state), 1); // CLOSED
 
-        // Trigger
         vm.warp(block.timestamp + Constants.TICKET_CUTOFF);
         vm.prank(coordinator);
         dm.triggerDrawing(1);
         d = dm.getDrawing(1);
-        assertEq(uint8(d.state), 2); // PENDING_VRF
+        assertEq(uint8(d.state), 2); // PENDING_RANDOMNESS
 
-        // Fulfill
-        uint256[] memory words = new uint256[](1);
-        words[0] = 42;
-        vrfCoord.fulfillRandomWordsWithOverride(d.vrfRequestId, words);
+        _fulfillRandomness(1);
         d = dm.getDrawing(1);
         assertEq(uint8(d.state), 3); // RESOLVED
     }
@@ -257,7 +263,6 @@ contract DrawingManagerTest is Test {
 
         assertTrue(dm.isDrawingOpen(1));
 
-        // Warp past close
         vm.warp(block.timestamp + Constants.DRAWING_DURATION - Constants.TICKET_CUTOFF);
         assertFalse(dm.isDrawingOpen(1));
     }
@@ -272,15 +277,11 @@ contract DrawingManagerTest is Test {
         dm.registerTicket(1, 102, 0x0001);
         vm.stopPrank();
 
-        // Warp, trigger, fulfill with 0x00FF
         vm.warp(block.timestamp + Constants.DRAWING_DURATION);
         vm.prank(coordinator);
         dm.triggerDrawing(1);
 
-        DrawingManager.Drawing memory d = dm.getDrawing(1);
-        uint256[] memory words = new uint256[](1);
-        words[0] = uint256(0x00FF);
-        vrfCoord.fulfillRandomWordsWithOverride(d.vrfRequestId, words);
+        _fulfillRandomnessWithHash(1, 0x00FF);
 
         uint256[] memory winners = dm.getWinningTickets(1);
         assertEq(winners.length, 2);

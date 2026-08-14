@@ -10,8 +10,8 @@ import {DrawingManager} from "../../src/DrawingManager.sol";
 import {PrizeVault} from "../../src/PrizeVault.sol";
 import {Constants} from "../../src/libraries/Constants.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
-import {MockAlchemistV3} from "../mocks/MockAlchemistV3.sol";
-import {MockVRFCoordinator} from "../mocks/MockVRFCoordinator.sol";
+import {MockAlchemistV3, MockMYTVault} from "../mocks/MockAlchemistV3.sol";
+import {MockDrandBeacon} from "../mocks/MockDrandBeacon.sol";
 
 /// @title Handler — Wraps protocol actions with bounded inputs for invariant testing
 contract Handler is Test {
@@ -23,7 +23,7 @@ contract Handler is Test {
     PrizeVault public prizeVault;
     MockERC20 public usdc;
     MockERC20 public alUSD;
-    MockVRFCoordinator public vrfCoordinator;
+    MockDrandBeacon public drandBeacon;
 
     address[] public actors;
     uint256[] public allTicketIds;
@@ -44,7 +44,7 @@ contract Handler is Test {
         PrizeVault _prizeVault,
         MockERC20 _usdc,
         MockERC20 _alUSD,
-        MockVRFCoordinator _vrfCoordinator,
+        MockDrandBeacon _drandBeacon,
         address[] memory _actors
     ) {
         coordinator = _coordinator;
@@ -55,7 +55,7 @@ contract Handler is Test {
         prizeVault = _prizeVault;
         usdc = _usdc;
         alUSD = _alUSD;
-        vrfCoordinator = _vrfCoordinator;
+        drandBeacon = _drandBeacon;
         actors = _actors;
     }
 
@@ -69,6 +69,7 @@ contract Handler is Test {
         try coordinator.buyTicket(canvas) returns (uint256 ticketId) {
             allTicketIds.push(ticketId);
             ghost_totalTicketsBought++;
+            // LUCK minted: 1 per ticket purchase
             ghost_totalLuckMinted += Constants.LUCK_PER_TICKET;
         } catch {}
     }
@@ -79,23 +80,32 @@ contract Handler is Test {
     }
 
     function triggerDrawing() external {
+        uint256 luckBefore = luckToken.totalSupply();
         try coordinator.triggerDrawing() {
             ghost_totalDrawingsTriggered++;
+            ghost_totalLuckMinted += luckToken.totalSupply() - luckBefore;
         } catch {}
     }
 
     function fulfillVRF(uint256 randomSeed) external {
         uint256 drawingId = drawingManager.currentDrawingId();
         DrawingManager.Drawing memory d = drawingManager.getDrawing(drawingId);
-        if (d.state != DrawingManager.DrawingState.PENDING_VRF) return;
+        if (d.state != DrawingManager.DrawingState.PENDING_RANDOMNESS) return;
 
         uint256[] memory words = new uint256[](1);
         words[0] = randomSeed;
-        try vrfCoordinator.fulfillRandomWordsWithOverride(d.vrfRequestId, words) {} catch {}
+        {
+            uint256[2] memory sig = [uint256(1), uint256(2)];
+            drandBeacon.setSignature(d.targetRound, sig);
+            try drawingManager.submitRandomness(drawingManager.currentDrawingId(), d.targetRound, sig) {} catch {}
+        }
     }
 
     function finalizeDrawing() external {
-        try coordinator.finalizeDrawing() {} catch {}
+        uint256 luckBefore = luckToken.totalSupply();
+        try coordinator.finalizeDrawing() {
+            ghost_totalLuckMinted += luckToken.totalSupply() - luckBefore;
+        } catch {}
     }
 
     function claimPrize(uint256 ticketSeed) external {
@@ -138,9 +148,9 @@ contract Handler is Test {
 
     function unstakeLuck(uint256 actorSeed, uint256 amount) external {
         address actor = actors[actorSeed % actors.length];
-        (uint256 staked,) = luckStaking.userInfo(actor);
-        if (staked == 0) return;
-        amount = bound(amount, 1, staked);
+        (uint256 stakedAmount,,) = luckStaking.userInfo(actor);
+        if (stakedAmount == 0) return;
+        amount = bound(amount, 1, stakedAmount);
 
         vm.prank(actor);
         try luckStaking.unstake(amount) {} catch {}

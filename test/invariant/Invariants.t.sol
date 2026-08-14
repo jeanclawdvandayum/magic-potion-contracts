@@ -10,8 +10,8 @@ import {DrawingManager} from "../../src/DrawingManager.sol";
 import {PrizeVault} from "../../src/PrizeVault.sol";
 import {Constants} from "../../src/libraries/Constants.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
-import {MockAlchemistV3} from "../mocks/MockAlchemistV3.sol";
-import {MockVRFCoordinator} from "../mocks/MockVRFCoordinator.sol";
+import {MockAlchemistV3, MockMYTVault} from "../mocks/MockAlchemistV3.sol";
+import {MockDrandBeacon} from "../mocks/MockDrandBeacon.sol";
 import {Handler} from "./Handler.sol";
 
 /// @title Invariants — Stateful invariant tests for critical protocol properties
@@ -25,34 +25,36 @@ contract InvariantsTest is Test {
     MockERC20 public usdc;
     MockERC20 public alUSD;
     MockAlchemistV3 public alchemist;
-    MockVRFCoordinator public vrfCoordinator;
+    MockDrandBeacon public drandBeacon;
     Handler public handler;
 
     address public alice = makeAddr("alice");
     address public bob = makeAddr("bob");
     address public charlie = makeAddr("charlie");
-    address public opsMultisig = makeAddr("opsMultisig");
-    address public yieldToken = makeAddr("yieldToken");
-
+    address public treasury = makeAddr("treasury");
+    MockMYTVault public mytVault;
+    MockERC20 public mytShare;
     function setUp() public {
         usdc = new MockERC20("USD Coin", "USDC", 6);
         alUSD = new MockERC20("Alchemix USD", "alUSD", 18);
-        alchemist = new MockAlchemistV3(address(alUSD), address(usdc));
-        vrfCoordinator = new MockVRFCoordinator();
+        mytShare = new MockERC20("Mock MYT", "mytMOCK", 18);
+        mytVault = new MockMYTVault(address(usdc), address(mytShare));
+        alchemist = new MockAlchemistV3(address(alUSD), address(usdc), address(mytVault), address(0));
+        drandBeacon = new MockDrandBeacon();
 
         uint64 nonce = vm.getNonce(address(this));
         address predicted = vm.computeCreateAddress(address(this), nonce + 5);
 
-        drawingManager = new DrawingManager(address(vrfCoordinator), predicted, 1, bytes32(uint256(1)), 500_000, 3);
+        drawingManager = new DrawingManager(address(drandBeacon), predicted);
         ticketNFT = new TicketNFT(predicted);
         luckToken = new LuckToken(predicted);
         luckStaking = new LuckStaking(address(luckToken), address(alUSD), predicted);
         prizeVault = new PrizeVault(address(alUSD), predicted);
 
         coordinator = new LuckyPotion(
-            address(usdc), address(alUSD), address(alchemist), yieldToken,
+            address(usdc), address(alUSD), address(alchemist), address(alchemist.mytVaultAddress()),
             address(ticketNFT), address(luckToken), address(luckStaking),
-            address(drawingManager), address(prizeVault), opsMultisig
+            address(drawingManager), address(prizeVault), treasury
         );
 
         coordinator.initialize();
@@ -71,7 +73,7 @@ contract InvariantsTest is Test {
 
         handler = new Handler(
             coordinator, ticketNFT, luckToken, luckStaking, drawingManager,
-            prizeVault, usdc, alUSD, vrfCoordinator, actors
+            prizeVault, usdc, alUSD, drandBeacon, actors
         );
 
         // Target only the handler
