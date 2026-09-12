@@ -101,16 +101,24 @@ contract LuckStaking is ReentrancyGuard {
         uint256 balanceAfter = rewardToken.balanceOf(address(this));
         assert(balanceAfter >= balanceBefore); // ERC-20 sanity, mirrors old behavior
 
-        uint256 totalToDistribute = balanceAfter - credited + paidOut;
+        // NOTE: order matters — credited may exceed balanceAfter after payouts
+        // (cumulative semantics), so add paidOut first. credited ≥ paidOut is
+        // invariant (payouts ⊆ distributions), so this never underflows.
+        uint256 totalToDistribute = balanceAfter + paidOut - credited;
 
         if (totalStaked == 0) {
             // Still nobody staked — everything stays orphaned (un-credited)
-            orphanedRewards = balanceAfter - credited + paidOut;
+            orphanedRewards = totalToDistribute;
             epochRewards[currentEpoch] += totalToDistribute;
         } else {
             epochRewards[currentEpoch] += totalToDistribute;
             accRewardPerShare += (totalToDistribute * PRECISION) / totalStaked;
-            credited = balanceAfter;
+            // FIX (paidOut rebase bug): credited must be CUMULATIVE. Re-basing
+            // it to balanceAfter erased the payout history whenever a
+            // no-staker gap occurred, so the next fold's
+            // `balance - credited + paidOut` counted pre-gap payouts as new
+            // distributable money — phantom rewards with no backing.
+            credited += totalToDistribute;
             orphanedRewards = 0;
         }
 

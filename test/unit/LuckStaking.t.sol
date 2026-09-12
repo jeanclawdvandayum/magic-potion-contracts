@@ -295,4 +295,61 @@ contract LuckStakingTest is Test {
         // Non-staker
         assertEq(staking.pendingRewards(bob), 0);
     }
+
+    // ──── Regression: credited re-base phantom rewards (invariant-v2 find) ────
+    //
+    // `credited = balanceAfter` re-based away payout history across a
+    // no-staker gap, so `balance - credited + paidOut` later counted pre-gap
+    // payouts as fresh distributable money — phantom rewards with no token
+    // backing. Sequence: staker era payout → all unstake → donation during
+    // the gap → re-stake + fold → payout → next fold must distribute ONLY
+    // real new money.
+
+    function test_regression_creditedRebase_phantomRewards() public {
+        // ── Era 1: alice stakes, 100 distributed, alice claims it all
+        vm.prank(alice);
+        staking.stake(10e18);
+        vm.prank(coordinator);
+        staking.addRewards(100e18);
+        vm.prank(alice);
+        staking.unstake(10e18); // pays 100, totalStaked → 0
+        assertEq(alUSD.balanceOf(alice), 100e18);
+        assertEq(staking.credited(), 100e18);
+        assertEq(staking.paidOut(), 100e18);
+
+        // ── Gap: donation + 200 pulled while nobody is staked → orphaned
+        alUSD.mint(address(this), 50e18);
+        alUSD.transfer(address(staking), 50e18);
+        vm.prank(coordinator);
+        staking.addRewards(200e18);
+        assertEq(staking.orphanedRewards(), 250e18); // 50 donation + 200 pull
+
+        // ── Era 2: bob stakes, fold credits 260 total (250 orphaned + 10)
+        vm.prank(bob);
+        staking.stake(10e18);
+        vm.prank(coordinator);
+        staking.addRewards(10e18);
+        assertEq(staking.credited(), 360e18); // cumulative: 100 + 260
+
+        // Bob claims the folded 260
+        vm.prank(bob);
+        staking.unstake(10e18);
+        assertEq(alUSD.balanceOf(bob), 260e18);
+        assertEq(staking.paidOut(), 360e18);
+
+        // ── Era 3: carol stakes FIRST (fold must have a live staker), then
+        // 5 donated + 1 pulled. carol must earn EXACTLY 6 — the pre-fix code
+        // computed 6 - 260 + 360 = 106 phantom here
+        vm.prank(carol);
+        staking.stake(10e18);
+        alUSD.mint(address(this), 5e18);
+        alUSD.transfer(address(staking), 5e18);
+        vm.prank(coordinator);
+        staking.addRewards(1e18);
+
+        assertEq(staking.pendingRewards(carol), 6e18, "phantom rewards minted");
+
+        // Solvency: contract holds at least what it owes carol
+        assertGe(alUSD.balanceOf(address(staking)), staking.pendingRewards(carol));
+    }
 }
