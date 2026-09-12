@@ -40,6 +40,11 @@ contract LuckStaking is ReentrancyGuard {
     ///      are picked up by the next addRewards() instead of being stranded.
     uint256 public credited;
 
+    /// @dev Cumulative rewards paid OUT to claimants (EX-05 bugfix): claims
+    ///      drain the contract balance but stay inside `credited`, so
+    ///      distributable = balance - credited + paidOut.
+    uint256 public paidOut;
+
     /// @dev Current staking epoch number. Increments when coordinator calls newEpoch().
     ///      Aligned with drawing cadence (1 epoch = 1 drawing period = 7 days).
     uint256 public currentEpoch;
@@ -96,11 +101,11 @@ contract LuckStaking is ReentrancyGuard {
         uint256 balanceAfter = rewardToken.balanceOf(address(this));
         assert(balanceAfter >= balanceBefore); // ERC-20 sanity, mirrors old behavior
 
-        uint256 totalToDistribute = balanceAfter - credited;
+        uint256 totalToDistribute = balanceAfter - credited + paidOut;
 
         if (totalStaked == 0) {
             // Still nobody staked — everything stays orphaned (un-credited)
-            orphanedRewards = balanceAfter - credited;
+            orphanedRewards = balanceAfter - credited + paidOut;
             epochRewards[currentEpoch] += totalToDistribute;
         } else {
             epochRewards[currentEpoch] += totalToDistribute;
@@ -125,6 +130,7 @@ contract LuckStaking is ReentrancyGuard {
             uint256 pending = _pendingRewards(user);
             if (pending > 0) {
                 rewardToken.safeTransfer(msg.sender, pending);
+                paidOut += pending;
                 emit Events.RewardsClaimed(msg.sender, pending);
             }
         }
@@ -152,6 +158,7 @@ contract LuckStaking is ReentrancyGuard {
         uint256 pending = _pendingRewards(user);
         if (pending > 0) {
             rewardToken.safeTransfer(msg.sender, pending);
+            paidOut += pending;
             emit Events.RewardsClaimed(msg.sender, pending);
         }
 
@@ -175,6 +182,7 @@ contract LuckStaking is ReentrancyGuard {
         user.rewardDebt = (user.stakedAmount * accRewardPerShare) / PRECISION;
         user.lastClaimEpoch = currentEpoch;
         rewardToken.safeTransfer(msg.sender, pending);
+        paidOut += pending;
 
         emit Events.RewardsClaimed(msg.sender, pending);
     }
