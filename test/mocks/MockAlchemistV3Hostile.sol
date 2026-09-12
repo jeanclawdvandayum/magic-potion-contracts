@@ -27,7 +27,7 @@ contract MockAlchemistV3Hostile is MockAlchemistV3 {
     function setMinMintAmount(uint256 v) external { minMintAmount = v; }
     function setForceMintAmount(uint256 v) external { forceMintAmount = v; }
 
-    function mint(uint256 tokenId, uint256 amount, address recipient) external override {
+    function mint(uint256 tokenId, uint256 amount, address recipient) public override {
         if (revertOnMint) revert("HostileAlchemist: mint disabled");
         uint256 required = forceMintAmount != 0 ? forceMintAmount : amount;
         if (required < minMintAmount) revert("HostileAlchemist: below min mint");

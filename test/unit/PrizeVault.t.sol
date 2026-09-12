@@ -29,7 +29,7 @@ contract PrizeVaultTest is Test {
         vm.prank(coordinator);
         vault.deposit(1, 1000e18);
 
-        (uint256 allocated,,,,) = vault.drawings(1);
+        (uint256 allocated,,,,,) = vault.drawings(1);
         assertEq(allocated, 1000e18);
         assertEq(alUSD.balanceOf(address(vault)), 1000e18);
     }
@@ -47,7 +47,7 @@ contract PrizeVaultTest is Test {
         vault.deposit(1, 300e18);
         vm.stopPrank();
 
-        (uint256 allocated,,,,) = vault.drawings(1);
+        (uint256 allocated,,,,,) = vault.drawings(1);
         assertEq(allocated, 800e18);
     }
 
@@ -74,7 +74,7 @@ contract PrizeVaultTest is Test {
         vault.resolveDrawing(1, 0x1234, 3);
         vm.stopPrank();
 
-        (,, uint256 winnerCount, bool resolved,) = vault.drawings(1);
+        (,, uint256 winnerCount, bool resolved,,) = vault.drawings(1);
         assertEq(winnerCount, 3);
         assertTrue(resolved);
         assertEq(vault.rolledOverBalance(), 0);
@@ -99,7 +99,7 @@ contract PrizeVaultTest is Test {
         vault.applyRollover(2);
         vm.stopPrank();
 
-        (uint256 allocated,,,,) = vault.drawings(2);
+        (uint256 allocated,,,,,) = vault.drawings(2);
         assertEq(allocated, 1000e18);
         assertEq(vault.rolledOverBalance(), 0);
     }
