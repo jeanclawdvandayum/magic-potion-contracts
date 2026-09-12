@@ -55,7 +55,7 @@ contract MockAlchemistV3 is IAlchemistV3 {
         return (tokenId, debtValue);
     }
 
-    function mint(uint256 tokenId, uint256 amount, address recipient) external override {
+    function mint(uint256 tokenId, uint256 amount, address recipient) external virtual override {
         uint256 maxBorrow = getMaxBorrowable(tokenId);
         require(amount <= maxBorrow, "MockAlchemist: insufficient borrowable");
 

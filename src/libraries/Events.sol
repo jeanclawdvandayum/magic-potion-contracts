@@ -64,6 +64,7 @@ library Events {
     event PrizeDeposited(uint256 indexed drawingId, uint256 amount);
 
     event PrizeRolledOver(uint256 indexed drawingId, uint256 amount);
+    event PrizeSwept(uint256 indexed drawingId, uint256 sweptAmount);
 
     event RolloverApplied(uint256 indexed newDrawingId, uint256 amount);
 
@@ -98,6 +99,11 @@ library Events {
     // ──── Keeper Events ────
     event KeeperPaid(address indexed keeper, uint256 amount);
     event KeeperParamsUpdated(uint256 baseReward, uint256 ratePerStep, uint256 stepDuration);
+    event KeeperRewardCapUpdated(uint256 newCap);
+
+    // ──── V3 Events ────
+    /// @dev FIX EX-03: emitted when AlchemistV3.mint reverts at drawing trigger.
+    event AlUsDMintSkipped(uint256 indexed drawingId, uint256 attemptedAmount);
 
     // ──── Epoch Events ────
     event EpochAdvanced(uint256 indexed newEpoch);

@@ -54,6 +54,9 @@ contract LuckyPotion is Ownable2Step, ReentrancyGuard {
     uint256 public keeperBaseReward = 1e18;
     uint256 public keeperRatePerStep = 0.1e18;
     uint256 public keeperStepDuration = 300;
+    /// @dev FIX EX-07: ceiling for stale-drawing keeper payouts so an abandoned
+    ///      drawing cannot mint unbounded LUCK to whoever eventually triggers it.
+    uint256 public keeperRewardCap = 5e18;
 
     // ──── Configurable Fee Split ────
     uint256 public prizeBps = 8300;
@@ -172,25 +175,39 @@ contract LuckyPotion is Ownable2Step, ReentrancyGuard {
     // ──── Drawing Lifecycle ────
 
     /// @notice Trigger the current drawing. Permissionless after drawTime.
-    /// @dev Mints all available alUSD from V3 position, distributes it
+    /// @dev Mints available alUSD from the V3 position, distributes it
     ///      (83% prize, 12% LUCK staking, 5% treasury),
     ///      advances LUCK epoch, then commits to a drand round.
+    ///      FIX EX-01: tolerates a third-party closeTicketSales (state CLOSED)
+    ///      so a griefer cannot brick the weekly drawing.
+    ///      FIX EX-03: a reverting V3 mint (debt ceiling, dust, pause) skips
+    ///      this week's distribution instead of bricking the lifecycle.
     function triggerDrawing() external nonReentrant {
         _requireActive();
 
         uint256 drawingId = drawingManager.currentDrawingId();
         DrawingManager.Drawing memory drawing = drawingManager.getDrawing(drawingId);
-        if (drawing.state != DrawingManager.DrawingState.OPEN) revert Errors.DrawingAlreadyTriggered();
+        bool isOpen = drawing.state == DrawingManager.DrawingState.OPEN;
+        if (!isOpen && drawing.state != DrawingManager.DrawingState.CLOSED) {
+            revert Errors.DrawingAlreadyTriggered();
+        }
         if (block.timestamp < drawing.drawTime) revert Errors.DrawingNotReady();
 
-        drawingManager.closeTicketSales(drawingId);
+        if (isOpen) {
+            drawingManager.closeTicketSales(drawingId);
+        }
 
         // Mint all available alUSD from V3 position
         if (positionTokenId != 0) {
             uint256 mintable = alchemist.getMaxBorrowable(positionTokenId);
             if (mintable > 0) {
-                alchemist.mint(positionTokenId, mintable, address(this));
-                _distributeAlUSD(drawingId, mintable);
+                try alchemist.mint(positionTokenId, mintable, address(this)) {
+                    _distributeAlUSD(drawingId, mintable);
+                } catch {
+                    // V3 refused (debt ceiling / minimum mint / pause).
+                    // Borrowing power stays in the position; the drawing lives on.
+                    emit Events.AlUsDMintSkipped(drawingId, mintable);
+                }
             }
         }
 
@@ -277,6 +294,11 @@ contract LuckyPotion is Ownable2Step, ReentrancyGuard {
         emit Events.KeeperParamsUpdated(_baseReward, _ratePerStep, _stepDuration);
     }
 
+    function setKeeperRewardCap(uint256 _cap) external onlyOwner {
+        keeperRewardCap = _cap;
+        emit Events.KeeperRewardCapUpdated(_cap);
+    }
+
     function setFeeSplit(uint256 _stakingBps, uint256 _treasuryBps) external onlyOwner {
         if (_treasuryBps > MAX_TREASURY_BPS) revert Errors.TreasuryCapExceeded();
         if (_stakingBps + _treasuryBps > Constants.BPS_DENOMINATOR) revert Errors.InvalidFeeSplit();
@@ -293,7 +315,11 @@ contract LuckyPotion is Ownable2Step, ReentrancyGuard {
         IERC20(token).safeTransfer(to, amount);
     }
 
-    function retryRound() external {
+    /// @notice Retarget to a new drand round if the original times out.
+    /// @dev FIX EX-02: owner-only. Public retry let anyone churn targetRounds,
+    ///      enabling unbounded griefing (and hash-shopping when no neutral
+    ///      keeper exists).
+    function retryRound() external onlyOwner {
         _requireActive();
         uint256 drawingId = drawingManager.currentDrawingId();
         drawingManager.retryRound(drawingId);
@@ -416,6 +442,7 @@ contract LuckyPotion is Ownable2Step, ReentrancyGuard {
             ? block.timestamp - eligibleTime : 0;
         uint256 steps = elapsed / keeperStepDuration;
         uint256 reward = keeperBaseReward + (steps * keeperRatePerStep);
+        if (reward > keeperRewardCap) reward = keeperRewardCap;
         luckToken.mint(keeper, reward);
         emit Events.KeeperPaid(keeper, reward);
     }

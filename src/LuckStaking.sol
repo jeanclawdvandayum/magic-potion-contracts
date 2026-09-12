@@ -34,6 +34,12 @@ contract LuckStaking is ReentrancyGuard {
     uint256 public accRewardPerShare;
     uint256 public orphanedRewards;
 
+    /// @dev FIX EX-05: cumulative alUSD already credited to the accumulator or
+    ///      to orphanedRewards. Rewards distributable at any moment are
+    ///      balanceOf(this) - credited, so direct donations (plain transfers)
+    ///      are picked up by the next addRewards() instead of being stranded.
+    uint256 public credited;
+
     /// @dev Current staking epoch number. Increments when coordinator calls newEpoch().
     ///      Aligned with drawing cadence (1 epoch = 1 drawing period = 7 days).
     uint256 public currentEpoch;
@@ -77,36 +83,31 @@ contract LuckStaking is ReentrancyGuard {
 
     /// @notice Add alUSD rewards for the current epoch.
     /// @dev Called by coordinator after minting alUSD at drawing trigger.
-    ///      If there are orphaned rewards from when nobody was staked, they are
-    ///      folded into the accumulator but NOT re-transferred (they're already
-    ///      in this contract from the previous addRewards call).
+    ///      FIX EX-05: distributes the entire un-credited balance, which
+    ///      includes any alUSD donated directly to this contract. When nobody
+    ///      is staked the balance stays marked as orphaned and is folded in at
+    ///      the first addRewards() after stakers appear.
     /// @param amount alUSD amount to distribute (18 decimals)
-    function addRewards(uint256 amount) external onlyCoordinator {
+    function addRewards(uint256 amount) external onlyCoordinator nonReentrant {
         if (amount == 0) revert Errors.ZeroAmount();
 
-        uint256 newFromCaller = amount;
-        uint256 fromOrphans = 0;
+        uint256 balanceBefore = rewardToken.balanceOf(address(this));
+        rewardToken.safeTransferFrom(msg.sender, address(this), amount);
+        uint256 balanceAfter = rewardToken.balanceOf(address(this));
+        assert(balanceAfter >= balanceBefore); // ERC-20 sanity, mirrors old behavior
 
-        // Fold in orphaned rewards from previous no-staker periods
-        // These are already in this contract's balance, so we only transfer
-        // the new amount from the caller.
-        if (orphanedRewards > 0) {
-            fromOrphans = orphanedRewards;
-            orphanedRewards = 0;
-        }
-
-        uint256 totalToDistribute = newFromCaller + fromOrphans;
-        epochRewards[currentEpoch] += totalToDistribute;
+        uint256 totalToDistribute = balanceAfter - credited;
 
         if (totalStaked == 0) {
-            // Still nobody staked — orphan again
-            orphanedRewards += totalToDistribute;
+            // Still nobody staked — everything stays orphaned (un-credited)
+            orphanedRewards = balanceAfter - credited;
+            epochRewards[currentEpoch] += totalToDistribute;
         } else {
+            epochRewards[currentEpoch] += totalToDistribute;
             accRewardPerShare += (totalToDistribute * PRECISION) / totalStaked;
+            credited = balanceAfter;
+            orphanedRewards = 0;
         }
-
-        // Only transfer the new amount from coordinator (orphans already here)
-        rewardToken.safeTransferFrom(msg.sender, address(this), newFromCaller);
 
         emit Events.RewardsAdded(totalToDistribute, accRewardPerShare);
     }

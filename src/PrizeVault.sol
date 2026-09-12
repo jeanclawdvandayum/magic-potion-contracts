@@ -24,7 +24,12 @@ contract PrizeVault is ReentrancyGuard {
         uint256 winnerCount;
         bool resolved;
         uint16 winningHash;
+        uint64 resolvedTime; // FIX EX-06: anchors the claim deadline
     }
+
+    /// @dev FIX EX-06: winning tickets have this long to claim before anyone
+    ///      can sweep the remainder into the rollover for future drawings.
+    uint256 public constant CLAIM_DEADLINE = 30 days;
 
     mapping(uint256 => DrawingPrize) public drawings;
 
@@ -62,6 +67,7 @@ contract PrizeVault is ReentrancyGuard {
         prize.resolved = true;
         prize.winningHash = winningHash;
         prize.winnerCount = winnerCount;
+        prize.resolvedTime = uint64(block.timestamp);
 
         if (winnerCount == 0) {
             rolledOverBalance += prize.allocated;
@@ -69,6 +75,26 @@ contract PrizeVault is ReentrancyGuard {
         }
 
         emit Events.PrizeResolved(drawingId, winningHash, winnerCount, prize.allocated);
+    }
+
+    /// @notice Sweep unclaimed prize remainder into the rollover pool.
+    /// @dev FIX EX-06: permissionless after CLAIM_DEADLINE. Without this,
+    ///      unclaimed winning prizes were stranded in the vault forever.
+    function sweepUnclaimed(uint256 drawingId) external nonReentrant {
+        DrawingPrize storage prize = drawings[drawingId];
+        if (!prize.resolved) revert Errors.DrawingNotResolved();
+        if (block.timestamp < prize.resolvedTime + CLAIM_DEADLINE) {
+            revert Errors.ClaimWindowStillOpen();
+        }
+
+        uint256 remaining = prize.allocated - prize.claimed;
+        if (remaining == 0) return;
+
+        // Close the claim window atomically with the sweep.
+        prize.claimed = prize.allocated;
+        rolledOverBalance += remaining;
+
+        emit Events.PrizeSwept(drawingId, remaining);
     }
 
     /// @notice Apply rollover balance to a new drawing
@@ -92,6 +118,7 @@ contract PrizeVault is ReentrancyGuard {
         if (!prize.resolved) revert Errors.DrawingNotResolved();
         if (prize.winnerCount == 0) revert Errors.DrawingHasNoWinner();
         if (ticketClaimed[ticketId]) revert Errors.TicketAlreadyClaimed();
+        if (prize.claimed >= prize.allocated) revert Errors.ClaimWindowClosed();
 
         uint256 perWinner = prize.allocated / prize.winnerCount;
 

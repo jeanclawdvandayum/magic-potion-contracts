@@ -24,36 +24,20 @@ DONE:
   - Updated IAlchemistV3.sol to match real V3 signatures
   - Created .env.example with all confirmed addresses
   - Documented VRF coordinator + key hash options
+  - [2026-08-14] LuckyPotion rewritten for NFT-based positions (positionTokenId
+    sentinel + deposit/mint/getCDP/getMaxBorrowable all tokenId-based)
+  - [2026-08-14] buyTicket flow: USDC -> MYT vault deposit (shares) -> V3 deposit
+  - [2026-08-14] protocolStats() uses getCDP/totalValue/getMaxBorrowable(tokenId)
+  - [2026-08-14] MockAlchemistV3 rewritten to real interface (incl. 18-dec
+    debt-scale getMaxBorrowable); MockDrandBeacon replaces MockVRFCoordinator
+  - [2026-08-14] All 152 tests green (build fixed: IR stack-too-deep in
+    buyTickets -> _mintAndRegister extraction). NOTE: randomness is now drand,
+    see AUDIT_ANYRAND.md — items 9-15 (Chainlink VRF) may be dropped entirely.
+  - [2026-08-14] Local anvil deploy works (deployments/local.json)
 
 TODO:
 
-  1. Rewrite LuckyPotion for NFT-based positions
-     V3 uses tokenId (position NFT) not address for all operations.
-     deposit() returns a tokenId on first call, reused after that.
-     LuckyPotion needs to store its positionTokenId after first deposit
-     and pass it to every subsequent deposit/mint/query.
-
-  2. Rewrite buyTicket() flow
-     Current: takes USDC, approves Alchemist, calls deposit(yieldToken, amount, this)
-     Real:    deposit takes yield tokens (MYT shares) not USDC
-              need to figure out the USDC -> yield token wrapping step
-              either the token adapter handles it automatically, or we
-              deposit USDC into MYT vault first to get shares, then deposit those
-
-  3. Rewrite triggerDrawing() mint call
-     Current: mint(amount, address(this))
-     Real:    mint(tokenId, amount, recipient)
-
-  4. Replace protocolStats() queries
-     Current: totalValue(address), debt(address)
-     Real:    getCDP(tokenId) returns (collateral, debt, earmarked)
-              totalValue(tokenId), getMaxBorrowable(tokenId)
-
-  5. Rewrite MockAlchemistV3.sol to match real interface
-     All 151 tests will break until this is done.
-
-  6. Re-run all tests, fix failures
-  7. Run on mainnet fork with real V3 addresses
+  7. Run on mainnet fork with real V3 addresses (mocks still in unit tests)
   8. Re-run slither after changes
 
 

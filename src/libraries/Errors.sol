@@ -25,6 +25,8 @@ library Errors {
     error TicketAlreadyClaimed();
     error TicketNotWinner();
     error DrawingHasNoWinner();
+    error ClaimWindowClosed();
+    error ClaimWindowStillOpen();
 
     // ──── Burns ────
     error TicketAlreadyBurned();
