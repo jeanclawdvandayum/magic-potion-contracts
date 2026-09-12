@@ -169,4 +169,29 @@ contract PrizeVaultTest is Test {
         vault.claimPrize(1, 1, alice);
         vm.stopPrank();
     }
+
+    // ──── Regression: rollover double-count on no-winner sweep (sim find) ────
+    //
+    // resolveDrawing(winnerCount=0) rolls allocated into rolledOverBalance.
+    // It must ALSO mark the drawing fully claimed — otherwise sweepUnclaimed
+    // re-rolls the same amount after CLAIM_DEADLINE, inflating the rollover
+    // beyond the vault's real balance (poisoned-rollover DoS).
+
+    function test_regression_noWinner_sweepDoesNotDoubleCount() public {
+        vm.startPrank(coordinator);
+        vault.deposit(1, 1000e18);
+        vault.resolveDrawing(1, 0x1234, 0); // rolls 1000 → rollover
+        vm.stopPrank();
+
+        assertEq(vault.rolledOverBalance(), 1000e18);
+        (, uint256 claimed,,,, ) = vault.drawings(1);
+        assertEq(claimed, 1000e18, "no-winner drawing must be fully accounted at resolve");
+
+        // After the claim deadline, sweeping must be a NO-OP for this drawing
+        vm.warp(block.timestamp + 35 days);
+        vault.sweepUnclaimed(1);
+
+        assertEq(vault.rolledOverBalance(), 1000e18, "sweep double-counted rolled funds");
+        assertEq(alUSD.balanceOf(address(vault)), 1000e18, "vault balance must back the rollover 1:1");
+    }
 }

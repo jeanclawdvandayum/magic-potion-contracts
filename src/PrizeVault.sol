@@ -71,6 +71,12 @@ contract PrizeVault is ReentrancyGuard {
 
         if (winnerCount == 0) {
             rolledOverBalance += prize.allocated;
+            // FIX (rollover double-count): atomically mark the drawing fully
+            // accounted. Previously claimed stayed 0, so sweepUnclaimed later
+            // computed remaining = allocated - 0 and rolled the SAME money
+            // into rolledOverBalance a second time — inflating the rollover
+            // far beyond the vault's real balance (poisoned-rollover DoS).
+            prize.claimed = prize.allocated;
             emit Events.PrizeRolledOver(drawingId, prize.allocated);
         }
 
